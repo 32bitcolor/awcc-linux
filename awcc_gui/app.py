@@ -19,7 +19,7 @@ import gi  # noqa: E402
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from awcc_client import (  # noqa: E402
@@ -50,6 +50,19 @@ PROFILE_INFO = {
 
 ACCENT_CPU = (0.20, 0.55, 0.95)
 ACCENT_GPU = (0.35, 0.78, 0.45)
+
+# App-shipped symbolic icons live here (works in dev checkout and /opt install).
+_ICON_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "icons")
+
+
+def register_icons():
+    """Add our bundled symbolic icons to the display's icon theme. Several tab
+    icons (fan, curve, power) have no equivalent in common themes like Breeze,
+    so we ship our own rather than render missing-icon placeholders."""
+    display = Gdk.Display.get_default()
+    if display is not None and os.path.isdir(_ICON_DIR):
+        Gtk.IconTheme.get_for_display(display).add_search_path(_ICON_DIR)
 
 
 def stat_card(title: str) -> tuple[Gtk.Widget, Gtk.Label, Gtk.Label]:
@@ -118,11 +131,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._stack.add_titled_with_icon(
             self._build_dashboard(), "dash", "Dashboard", "speedometer-symbolic")
         self._stack.add_titled_with_icon(
-            self._build_fans(), "fans", "Fans", "weather-windy-symbolic")
+            self._build_fans(), "fans", "Fans", "awcc-fan-symbolic")
         self._stack.add_titled_with_icon(
-            self._build_curves(), "curves", "Curves", "network-cellular-signal-good-symbolic")
+            self._build_curves(), "curves", "Curves", "awcc-curve-symbolic")
         self._stack.add_titled_with_icon(
-            self._build_power(), "power", "Power", "power-profile-performance-symbolic")
+            self._build_power(), "power", "Power", "awcc-power-symbolic")
         self._stack.add_titled_with_icon(
             self._build_settings(), "settings", "Settings", "emblem-system-symbolic")
 
@@ -786,6 +799,7 @@ class AwccApp(Adw.Application):
     def do_activate(self):
         first = self._win is None
         if first:
+            register_icons()
             self._win = MainWindow(self)
             from gi.repository import Gio
             about = Gio.SimpleAction.new("about", None)

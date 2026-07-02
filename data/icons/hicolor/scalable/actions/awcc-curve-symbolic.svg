@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="#2e3436">
+    <!-- axes -->
+    <path d="M2 1.5 C 1.72 1.5 1.5 1.72 1.5 2 L 1.5 13.5 C 1.5 13.78 1.72 14 2 14
+             L 14.5 14 L 14.5 12.8 L 2.7 12.8 L 2.7 2 C 2.7 1.72 2.28 1.5 2 1.5 Z"/>
+    <!-- rising fan curve -->
+    <path d="M2.6 12 C 5.5 11.7 6.6 10.6 8 8 C 9.4 5.4 10.8 3.4 13.6 2.8"
+          fill="none" stroke="#2e3436" stroke-width="1.5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- points -->
+    <circle cx="4.4" cy="11.5" r="1.05"/>
+    <circle cx="8" cy="8" r="1.05"/>
+    <circle cx="11.6" cy="4" r="1.05"/>
+  </g>
+</svg>
