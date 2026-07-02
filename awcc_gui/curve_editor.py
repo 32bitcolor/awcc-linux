@@ -223,7 +223,8 @@ class FanCurveEditor(Gtk.DrawingArea):
             cr.fill()
             cr.set_source_rgba(1, 1, 1, 0.85)
             cr.move_to(min(x + 6, ml + pw - 60), mt + 12)
-            cr.show_text(f"{self.current_temp:.0f}° → {cb:.0f}%")
+            # Use ASCII "->": cairo's toy-font path renders U+2192 as tofu.
+            cr.show_text(f"{self.current_temp:.0f}° -> {cb:.0f}%")
 
         # Control points.
         for t, b in self.points:

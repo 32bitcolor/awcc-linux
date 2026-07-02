@@ -5,13 +5,15 @@ from __future__ import annotations
 import os
 import sys
 
-# GTK4's GPU renderers (ngl/gl/vulkan) intermittently leave a stale 1px damage
-# artifact on some GPU/compositor combos (observed on NVIDIA + KWin): a stray
-# pixel next to group titles that only clears on window resize. Testing showed
-# every GPU renderer exhibits it occasionally while the software (cairo) renderer
-# is reliably clean. This UI is lightweight, so software rendering costs nothing
-# noticeable. Must be set before GTK initialises; respect an explicit override.
+# Work around a compositor damage-tracking artifact (observed on NVIDIA + KWin):
+# a stray 1px pixel appears next to group titles and only clears on window
+# resize. The app's own render is clean — it's introduced during partial
+# repaints — so the fix is to (a) use the software renderer, which is immune to
+# GPU-renderer damage quirks, and (b) force full-scene redraws so no partial
+# damage region can leave a stale pixel. Both are cheap for this lightweight UI
+# and must be set before GTK initialises. Respect explicit overrides.
 os.environ.setdefault("GSK_RENDERER", "cairo")
+os.environ.setdefault("GSK_DEBUG", "full-redraw")
 
 import gi  # noqa: E402
 

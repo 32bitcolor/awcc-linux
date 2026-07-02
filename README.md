@@ -8,7 +8,10 @@ fan boost, and fully custom **fan curves** — driven by the mainline
 `alienware-wmi` kernel driver.
 
 ![Dashboard](docs/dashboard.png)
-![Fan curves](docs/curves.png)
+
+| Custom fan curves | Fan control | Settings |
+|:---:|:---:|:---:|
+| ![Fan curves](docs/curves.png) | ![Fan control](docs/fans.png) | ![Settings](docs/settings.png) |
 
 ---
 
@@ -145,15 +148,20 @@ python3 -m awccd.main &
 |------|---------|
 | `awccd/` | root daemon: `hardware.py` (sysfs/nvidia), `config.py` (curves), `engine.py` (control loop), `server.py` (socket), `main.py` |
 | `awcc_client.py` | shared socket client |
-| `awcc_gui/` | GTK4 GUI: `app.py`, `curve_editor.py`, `graph.py`, `backend.py` |
+| `awcc_gui/` | GTK4 GUI: `app.py`, `curve_editor.py`, `graph.py`, `tray.py` (system tray), `settings.py` (autostart/tray prefs), `backend.py` (socket bridge) |
 | `awcc`, `awcc-cli` | launchers |
 | `packaging/` | systemd unit, `.desktop`, install/uninstall |
 
 ## Safety notes
 
-- `fanN_boost` is **additive** and honoured by the firmware only in the `custom`
-  platform profile; the daemon switches to `custom` automatically for curve and
-  manual modes. Boost adds cooling; it cannot disable the EC's own protection.
+- Fan control uses the driver's **additive** `fanN_boost` mechanism: boost only
+  ever *adds* cooling on top of the embedded controller's own curve, so a curve
+  or manual level can't undercool the machine — the EC keeps its safety floor.
+- Power profile and fan mode are **independent**. The daemon keeps whatever
+  `platform_profile` you selected and layers boost on top; it never overrides
+  your profile. (On the Alienware m18 R1 boost is honoured under any profile.
+  A few other models only honour `fanN_boost` while the `custom` profile is
+  active — there, pick the **Custom** profile in addition to a fan mode.)
 - The daemon writes defensively — a single failed sysfs write is logged and
   skipped, never crashing the control loop.
 - Nothing is exposed over the network; the only interface is a local,

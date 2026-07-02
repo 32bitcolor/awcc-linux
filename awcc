@@ -4,10 +4,11 @@
 import os
 import sys
 
-# Use the software renderer by default (avoids an intermittent GTK4 GPU-renderer
-# damage artifact; see awcc_gui/app.py). Set here too, before anything imports
-# GTK, and only if the user hasn't chosen a renderer.
+# Work around a compositor damage artifact (stray pixel by group titles that
+# clears on resize; see awcc_gui/app.py): software renderer + forced full
+# redraws. Set here too, before anything imports GTK; respect user overrides.
 os.environ.setdefault("GSK_RENDERER", "cairo")
+os.environ.setdefault("GSK_DEBUG", "full-redraw")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from awcc_gui.app import main  # noqa: E402
