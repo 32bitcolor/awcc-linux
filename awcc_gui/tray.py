@@ -136,6 +136,7 @@ class Tray:
         self._menu_reg = 0
         self._actions: dict[int, tuple] = {}
         self._last_label = None
+        self._watcher_watch_id = 0
         self.available = False
 
         self.bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
@@ -159,24 +160,37 @@ class Tray:
         except GLib.Error as exc:
             print(f"[tray] register_object failed: {exc}", flush=True)
             return
-        # Register with the watcher so a host actually shows us.
+        # Register with the tray host whenever it is (or becomes) available.
+        # At login the app often starts before plasmashell's StatusNotifierWatcher
+        # exists, and the host can also restart; watching the name re-registers us
+        # each time it appears instead of giving up once at startup.
+        self._watcher_watch_id = Gio.bus_watch_name(
+            Gio.BusType.SESSION, WATCHER_NAME, Gio.BusNameWatcherFlags.NONE,
+            self._on_watcher_appeared, self._on_watcher_vanished)
+
+    def _on_watcher_appeared(self, conn, name, owner):
         conn.call(WATCHER_NAME, WATCHER_PATH, WATCHER_NAME,
                   "RegisterStatusNotifierItem",
                   GLib.Variant("(s)", (self.bus_name,)), None,
                   Gio.DBusCallFlags.NONE, -1, None, self._on_registered)
+
+    def _on_watcher_vanished(self, conn, name):
+        self.available = False
 
     def _on_registered(self, conn, res):
         try:
             conn.call_finish(res)
             self.available = True
         except GLib.Error as exc:
-            print(f"[tray] no StatusNotifierWatcher ({exc}); tray unavailable",
-                  flush=True)
+            print(f"[tray] RegisterStatusNotifierItem failed ({exc})", flush=True)
 
     def _on_name_lost(self, conn, name):
         self.available = False
 
     def shutdown(self):
+        if self._watcher_watch_id:
+            Gio.bus_unwatch_name(self._watcher_watch_id)
+            self._watcher_watch_id = 0
         if self.conn:
             if self._item_reg:
                 self.conn.unregister_object(self._item_reg)
