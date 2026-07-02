@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""awcc-cli — terminal control for AWCC-Linux.
+
+Talks to the awccd daemon over its Unix socket. Examples:
+
+    awcc-cli status                 # temps, fans, mode, profile
+    awcc-cli watch                  # live-updating status
+    awcc-cli profile performance    # set a firmware thermal profile
+    awcc-cli mode custom            # follow the fan curves
+    awcc-cli boost gpu 80           # manual: set GPU fans to 80% boost
+    awcc-cli curve cpu              # print the CPU fan curve
+    awcc-cli curve cpu 40:0 60:30 80:70 90:100   # set the CPU fan curve
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from awcc_client import Client, DaemonUnavailable  # noqa: E402
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GRN = "\033[32m"
+YEL = "\033[33m"
+CYN = "\033[36m"
+RST = "\033[0m"
+
+
+def color_temp(t: float | None) -> str:
+    if t is None:
+        return f"{DIM}--{RST}"
+    c = GRN if t < 65 else YEL if t < 85 else RED
+    return f"{c}{t:.0f}°C{RST}"
+
+
+def print_status(state: dict) -> None:
+    if not state.get("ok"):
+        print(f"{RED}error:{RST} {state.get('error')}")
+        return
+    cfg = state.get("config", {})
+    print(f"{BOLD}Mode:{RST} {cfg.get('mode')}   "
+          f"{BOLD}Profile:{RST} {state.get('profile')}   "
+          f"{DIM}(choices: {' '.join(state.get('profile_choices', []))}){RST}")
+
+    nv = state.get("nvidia") or {}
+    print(f"\n{BOLD}Temperatures{RST}")
+    for t in state.get("temps", []):
+        print(f"  {t['label']:<16} {color_temp(t['temp'])}  {DIM}{t['source']}{RST}")
+    if nv.get("util") is not None:
+        print(f"  {'GPU util':<16} {nv['util']:.0f}%   "
+              f"{'GPU power':<10} {nv.get('power', 0):.0f}W")
+
+    print(f"\n{BOLD}Fans{RST}")
+    tgt = state.get("target_boost", {})
+    for f in state.get("fans", []):
+        bar_pct = f["boost_pct"]
+        grp = f.get("group") or "-"
+        print(f"  {f['label']:<12} {f['rpm']:>5} RPM  "
+              f"{DIM}(max {f['max_rpm']}){RST}  boost {CYN}{bar_pct:>3}%{RST}  "
+              f"{DIM}[{grp}]{RST}")
+    if tgt:
+        print(f"  {DIM}target boost -> cpu {tgt.get('cpu', 0)}%  "
+              f"gpu {tgt.get('gpu', 0)}%{RST}")
+
+
+def cmd_status(c: Client, _args) -> int:
+    print_status(c.get_state())
+    return 0
+
+
+def cmd_watch(c: Client, _args) -> int:
+    import time
+    try:
+        while True:
+            state = c.get_state()
+            os.system("clear")
+            print(f"{DIM}awcc-cli watch — Ctrl-C to exit{RST}\n")
+            print_status(state)
+            time.sleep(1.5)
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_profile(c: Client, args) -> int:
+    if not args:
+        print("usage: awcc-cli profile <name>")
+        return 2
+    r = c.set_profile(args[0])
+    print(f"profile -> {r.get('profile')}" if r.get("ok") else f"error: {r.get('error')}")
+    return 0 if r.get("ok") else 1
+
+
+def cmd_mode(c: Client, args) -> int:
+    if not args:
+        print("usage: awcc-cli mode <profile|custom|manual>")
+        return 2
+    r = c.set_mode(args[0])
+    print(f"mode -> {r.get('config', {}).get('mode')}" if r.get("ok")
+          else f"error: {r.get('error')}")
+    return 0 if r.get("ok") else 1
+
+
+def cmd_boost(c: Client, args) -> int:
+    if len(args) < 2:
+        print("usage: awcc-cli boost <cpu|gpu> <0-100>")
+        return 2
+    group, pct = args[0], float(args[1])
+    c.set_mode("manual")
+    r = c.set_manual(group, pct)
+    print(f"{group} manual boost -> {pct:.0f}%" if r.get("ok")
+          else f"error: {r.get('error')}")
+    return 0 if r.get("ok") else 1
+
+
+def cmd_curve(c: Client, args) -> int:
+    if not args:
+        print("usage: awcc-cli curve <cpu|gpu> [temp:boost ...]")
+        return 2
+    group = args[0]
+    if len(args) == 1:
+        state = c.get_state()
+        pts = state.get("config", {}).get("curves", {}).get(group, [])
+        print(f"{group} curve:")
+        for t, b in pts:
+            print(f"  {t:>3.0f}°C -> {b:>3.0f}%")
+        return 0
+    points = []
+    for tok in args[1:]:
+        try:
+            t, b = tok.split(":")
+            points.append([float(t), float(b)])
+        except ValueError:
+            print(f"bad point '{tok}', expected temp:boost e.g. 70:60")
+            return 2
+    r = c.set_curve(group, points)
+    print(f"{group} curve set ({len(points)} points)" if r.get("ok")
+          else f"error: {r.get('error')}")
+    return 0 if r.get("ok") else 1
+
+
+COMMANDS = {
+    "status": cmd_status,
+    "watch": cmd_watch,
+    "profile": cmd_profile,
+    "mode": cmd_mode,
+    "boost": cmd_boost,
+    "curve": cmd_curve,
+}
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd, args = argv[0], argv[1:]
+    fn = COMMANDS.get(cmd)
+    if not fn:
+        print(f"unknown command '{cmd}'. Try: {', '.join(COMMANDS)}")
+        return 2
+    try:
+        with Client() as c:
+            return fn(c, args)
+    except DaemonUnavailable as exc:
+        print(f"{RED}awccd not reachable:{RST} {exc}")
+        print(f"{DIM}Is the service running?  systemctl status awccd{RST}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

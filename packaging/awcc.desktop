@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AWCC-Linux
+GenericName=Thermal & Fan Control
+Comment=Alienware Command Center-style thermal and fan control
+Exec=awcc
+Icon=io.github.awcclinux.Awcc
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=fan;thermal;temperature;cooling;alienware;awcc;profile;
+StartupNotify=true

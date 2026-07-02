@@ -1,0 +1,25 @@
+[Unit]
+Description=AWCC-Linux thermal & fan control daemon
+Documentation=https://github.com/32bitcolor/awcc-linux
+After=multi-user.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/awcc
+ExecStart=/usr/bin/python3 -m awccd.main
+WorkingDirectory=/opt/awcc
+Restart=on-failure
+RestartSec=3
+
+# Creates /run/awcc (socket lives here) and /var/lib/awcc (config).
+RuntimeDirectory=awcc
+RuntimeDirectoryMode=0755
+StateDirectory=awcc
+
+# The daemon must write to sysfs to control fans/profile; keep hardening light
+# so those writes always succeed across kernels/hardware.
+NoNewPrivileges=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
