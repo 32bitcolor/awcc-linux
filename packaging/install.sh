@@ -60,7 +60,9 @@ command -v update-desktop-database >/dev/null 2>&1 && \
 # 4. systemd service
 install -m 0644 "$SRC/packaging/awccd.service" "$UNIT"
 systemctl daemon-reload
-systemctl enable --now awccd.service
+systemctl enable awccd.service
+# restart (not just start) so re-installs pick up updated code.
+systemctl restart awccd.service
 
 echo
 echo "==> Done."

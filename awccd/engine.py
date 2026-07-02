@@ -69,11 +69,22 @@ class ControlEngine:
     # -- control policy ----------------------------------------------------
 
     def apply_control(self, force: bool = False) -> None:
-        """Enforce the current mode on the hardware. Caller holds self._lock."""
+        """Enforce profile + fan mode on the hardware. Caller holds self._lock.
+
+        Power profile and fan mode are orthogonal: we always keep the chosen
+        platform_profile applied, then layer fan boost on top according to the
+        mode. `fanN_boost` is additive and honoured regardless of profile
+        (verified on Alienware m18 R1), so we never hijack the user's profile.
+
+        Note: a few Alienware models only honour fanN_boost while the "custom"
+        platform_profile is selected. On those, pick the "Custom" profile in
+        addition to a fan mode. See README.
+        """
+        # Always enforce the chosen base power profile.
+        self.hw.set_profile(self.cfg.profile)
         mode = self.cfg.mode
 
         if mode == protocol.MODE_PROFILE:
-            self.hw.set_profile(self.cfg.profile)
             # Release any lingering boost so firmware fully owns the fans.
             for g in protocol.GROUPS:
                 self._set_group(g, 0.0, force)
@@ -81,14 +92,11 @@ class ControlEngine:
             self._last_boost.clear()
             return
 
-        # manual + custom both require the "custom" platform profile for the
-        # fanN_boost values to take effect.
-        if "custom" in self.hw.get_profile_choices():
-            self.hw.set_profile("custom")
-
         if mode == protocol.MODE_MANUAL:
             for g in protocol.GROUPS:
-                self._set_group(g, self.cfg.manual(g), force)
+                boost = self.cfg.manual(g)
+                self._last_boost[g] = boost
+                self._set_group(g, boost, force)
             return
 
         if mode == protocol.MODE_CUSTOM:
@@ -155,10 +163,9 @@ class ControlEngine:
                     self.cfg.set_mode(req.get("mode"))
                     self.apply_control(force=True)
                 elif cmd == protocol.CMD_SET_PROFILE:
-                    prof = req.get("profile")
-                    self.cfg.set_profile(prof)
-                    # Selecting a profile implies follow-profile mode.
-                    self.cfg.set_mode(protocol.MODE_PROFILE)
+                    # Profile (power) is orthogonal to fan mode; only change the
+                    # profile and re-apply. The active fan mode is preserved.
+                    self.cfg.set_profile(req.get("profile"))
                     self.apply_control(force=True)
                 elif cmd == protocol.CMD_SET_CURVE:
                     self.cfg.set_curve(req.get("group"), req.get("points"))
