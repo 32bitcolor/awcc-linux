@@ -195,10 +195,15 @@ class MainWindow(Adw.ApplicationWindow):
         self._mode_box.set_halign(Gtk.Align.CENTER)
         self._mode_box.set_margin_top(4)
         self._mode_box.set_margin_bottom(4)
+        mode_group = None
         for mode, label in ((MODE_PROFILE, "Follow Profile"),
                             (MODE_CUSTOM, "Custom Curves"),
                             (MODE_MANUAL, "Manual")):
             btn = Gtk.ToggleButton(label=label)
+            if mode_group is None:
+                mode_group = btn
+            else:
+                btn.set_group(mode_group)  # radio behaviour: mutually exclusive
             btn.connect("toggled", self._on_mode_toggled, mode)
             self._mode_buttons[mode] = btn
             self._mode_box.append(btn)
@@ -310,6 +315,9 @@ class MainWindow(Adw.ApplicationWindow):
     def _sync_profiles(self, state):
         choices = state.get("profile_choices", [])
         cur = state.get("profile")
+        # Guard the whole sync: building/grouping radio buttons or setting the
+        # active one must never be mistaken for a user click that sends a command.
+        self._suppress = True
         if not self._profile_buttons and choices:
             group_btn = None
             for prof in choices:
@@ -323,9 +331,7 @@ class MainWindow(Adw.ApplicationWindow):
                 btn.connect("toggled", self._on_profile_clicked, prof)
                 self._profile_buttons[prof] = btn
                 self._profile_box.append(btn)
-        self._suppress = True
-        # In profile mode the selected profile is the active one; in custom/manual
-        # the daemon forces "custom", so reflect actual hardware profile.
+        # Reflect the actual hardware profile (orthogonal to fan mode).
         btn = self._profile_buttons.get(cur)
         if btn and not btn.get_active():
             btn.set_active(True)
