@@ -9,9 +9,11 @@ fan boost, and fully custom **fan curves** — driven by the mainline
 
 ![Dashboard](docs/dashboard.png)
 
-| Custom fan curves | Fan control | Settings |
-|:---:|:---:|:---:|
-| ![Fan curves](docs/curves.png) | ![Fan control](docs/fans.png) | ![Settings](docs/settings.png) |
+| Custom fan curves | Power & performance |
+|:---:|:---:|
+| ![Fan curves](docs/curves.png) | ![Power](docs/power.png) |
+| **Fan control** | **Settings & automation** |
+| ![Fan control](docs/fans.png) | ![Settings](docs/settings.png) |
 
 ---
 
@@ -26,6 +28,14 @@ fan boost, and fully custom **fan curves** — driven by the mainline
   fan groups, evaluated continuously by the daemon. This is the AWCC headline
   feature that Linux otherwise lacks.
 - **Manual fan boost** — pin the CPU/GPU fans to a fixed boost level.
+- **Power & performance** — a Power tab to cap the NVIDIA GPU board power (on
+  GPUs that allow it), pick the CPU energy-performance preference and frequency
+  governor, and tune Intel RAPL package power limits (PL1/PL2). The daemon
+  enforces each override and cleanly restores the firmware value when you release
+  it. *(Note: many laptop GPUs — including the RTX 4090 Laptop — lock the power
+  limit under Dynamic Boost; the app detects this and disables that control.)*
+- **Auto-profiles** — automatically switch the thermal profile when you plug in
+  or unplug the charger.
 - **System tray** — closing the window minimizes to the system tray
   (StatusNotifierItem, native on KDE Plasma). The tray shows live CPU/GPU temps
   on hover and offers quick thermal-profile and fan-mode switching plus Quit;
@@ -57,6 +67,8 @@ fan boost, and fully custom **fan curves** — driven by the mainline
 - **`awccd`** runs as a small root systemd service. It is the *only* component
   that writes to `/sys`. It polls sensors, applies the active mode, and serves a
   local Unix socket at `/run/awcc/awccd.sock` (owned `root:wheel`, mode `0660`).
+  It also applies power overrides (GPU power via `nvidia-smi`, CPU EPP/governor,
+  Intel RAPL limits) and auto-profile rules.
 - **`awcc`** (GTK4/libadwaita GUI) and **`awcc-cli`** connect to that socket.
   Because socket access is gated on the `wheel` group, control needs **no
   password after install** — the same trust boundary as `sudo`.
@@ -125,6 +137,13 @@ awcc-cli mode custom                     # follow the fan curves
 awcc-cli boost gpu 80                    # manual: GPU fans to 80% boost
 awcc-cli curve cpu                       # show the CPU fan curve
 awcc-cli curve cpu 40:0 60:30 80:70 90:100   # set the CPU fan curve (temp:boost)
+
+awcc-cli gpu-power 150                    # cap GPU to 150W ('auto' to release)
+awcc-cli cpu-epp performance              # CPU energy-perf preference ('auto' to release)
+awcc-cli cpu-gov performance              # CPU governor
+awcc-cli cpu-pl pl1 65                    # CPU package power limit PL1 (watts)
+awcc-cli auto on ac=performance battery=quiet   # auto-switch profile by AC state
+awcc-cli auto off
 ```
 
 ## Development

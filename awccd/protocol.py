@@ -57,7 +57,12 @@ CMD_SET_PROFILE = "set_profile"    # {profile}
 CMD_SET_CURVE = "set_curve"        # {group, points:[[temp,boost_pct],...]}
 CMD_SET_MANUAL = "set_manual"      # {group, boost_pct}
 CMD_SET_POLL = "set_poll"          # {interval}
+CMD_SET_POWER = "set_power"        # {field, value}  (value None = unmanaged)
+CMD_SET_AUTO = "set_auto"          # {auto: {partial rules}}
 CMD_PING = "ping"
+
+# Power override fields (None => let firmware/profile manage it).
+POWER_FIELDS = ("gpu_limit_w", "cpu_epp", "cpu_governor", "cpu_pl1_w", "cpu_pl2_w")
 
 # Default fan curves (temperature °C -> boost %).  boost % is a percentage of the
 # raw 0-255 fanN_boost range.  These are conservative-but-responsive defaults
@@ -80,4 +85,20 @@ DEFAULT_CONFIG = {
     "hysteresis_c": 2.0,          # only re-evaluate a curve after temp moves this much
     "manual": {GROUP_CPU: 0, GROUP_GPU: 0},
     "curves": {GROUP_CPU: list(DEFAULT_CURVE), GROUP_GPU: list(DEFAULT_CURVE)},
+    # Power overrides — None means "don't manage; leave to firmware/profile".
+    "power": {
+        "gpu_limit_w": None,
+        "cpu_epp": None,
+        "cpu_governor": None,
+        "cpu_pl1_w": None,
+        "cpu_pl2_w": None,
+    },
+    # Auto-profiles: apply a profile/mode when AC power state changes.
+    "auto": {
+        "ac_enabled": False,
+        "ac_profile": None,       # None => don't change that field on this event
+        "ac_mode": None,
+        "battery_profile": None,
+        "battery_mode": None,
+    },
 }

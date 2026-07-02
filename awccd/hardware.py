@@ -29,6 +29,13 @@ HWMON_ROOT = "/sys/class/hwmon"
 PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
 PLATFORM_PROFILE_CHOICES = "/sys/firmware/acpi/platform_profile_choices"
 
+# Power / performance interfaces.
+CPU_BASE = "/sys/devices/system/cpu"
+RAPL_ROOT = "/sys/class/powercap"
+AC_ONLINE = "/sys/class/power_supply/AC/online"
+# RAPL constraint index -> logical name (verified: 0=long-term/PL1, 1=short/PL2).
+RAPL_PL = {"pl1": 0, "pl2": 1}
+
 # Raw fanN_boost range exposed by alienware-wmi.
 BOOST_RAW_MAX = 255
 
@@ -120,6 +127,9 @@ class Hardware:
         self.has_nvidia = self._detect_nvidia()
         self._nv_cache: dict | None = None
         self._nv_cache_ts = 0.0
+        self._gpu_pwr_cache: dict | None = None
+        self._gpu_pwr_ts = 0.0
+        self._gpu_settable: bool | None = None  # probed lazily
 
         # Map logical fan groups -> alienware fan indices (1-based, per _label).
         self.group_fans: dict[str, list[int]] = {"cpu": [], "gpu": []}
@@ -317,6 +327,167 @@ class Hardware:
         except (subprocess.SubprocessError, OSError):
             return None
 
+    # -- power / performance ----------------------------------------------
+
+    def ac_online(self) -> bool | None:
+        v = _read_int(AC_ONLINE)
+        return None if v is None else bool(v)
+
+    # CPU energy-performance preference (intel_pstate active mode).
+    def _epp_paths(self) -> list[str]:
+        return glob.glob(os.path.join(
+            CPU_BASE, "cpu[0-9]*", "cpufreq", "energy_performance_preference"))
+
+    def get_epp(self) -> str | None:
+        p = os.path.join(CPU_BASE, "cpu0", "cpufreq",
+                         "energy_performance_preference")
+        return _read(p)
+
+    def epp_choices(self) -> list[str]:
+        raw = _read(os.path.join(
+            CPU_BASE, "cpu0", "cpufreq",
+            "energy_performance_available_preferences"))
+        return raw.split() if raw else []
+
+    def set_epp(self, value: str) -> bool:
+        if value not in self.epp_choices():
+            return False
+        ok = True
+        for p in self._epp_paths():
+            ok = _write(p, value) and ok
+        return ok
+
+    # CPU frequency governor.
+    def get_governor(self) -> str | None:
+        return _read(os.path.join(CPU_BASE, "cpu0", "cpufreq", "scaling_governor"))
+
+    def governor_choices(self) -> list[str]:
+        raw = _read(os.path.join(
+            CPU_BASE, "cpu0", "cpufreq", "scaling_available_governors"))
+        return raw.split() if raw else []
+
+    def set_governor(self, value: str) -> bool:
+        if value not in self.governor_choices():
+            return False
+        ok = True
+        for p in glob.glob(os.path.join(CPU_BASE, "cpu[0-9]*", "cpufreq",
+                                        "scaling_governor")):
+            ok = _write(p, value) and ok
+        return ok
+
+    # Intel RAPL package power limits (watts).
+    def _rapl_pkg(self) -> str | None:
+        for d in sorted(glob.glob(os.path.join(RAPL_ROOT, "intel-rapl:[0-9]*"))):
+            if _read(os.path.join(d, "name")) == "package-0":
+                return d
+        return None
+
+    def get_cpu_power(self) -> dict:
+        d = self._rapl_pkg()
+        out: dict = {"available": d is not None}
+        if not d:
+            return out
+        for key, idx in RAPL_PL.items():
+            uw = _read_int(os.path.join(d, f"constraint_{idx}_power_limit_uw"))
+            mx = _read_int(os.path.join(d, f"constraint_{idx}_max_power_uw"))
+            out[key] = round(uw / 1_000_000) if uw else None
+            out[f"{key}_max"] = round(mx / 1_000_000) if mx else None
+        return out
+
+    def set_cpu_power(self, which: str, watts: float) -> bool:
+        d = self._rapl_pkg()
+        if not d or which not in RAPL_PL:
+            return False
+        uw = int(max(1, watts) * 1_000_000)
+        return _write(os.path.join(d, f"constraint_{RAPL_PL[which]}_power_limit_uw"), uw)
+
+    # NVIDIA GPU power limit (watts) via nvidia-smi.
+    def get_gpu_power(self) -> dict | None:
+        if not self.has_nvidia:
+            return None
+        now = time.monotonic()
+        if self._gpu_pwr_cache is not None and (now - self._gpu_pwr_ts) < 1.5:
+            return self._gpu_pwr_cache
+        # The enforced limit is N/A in the CSV query on this driver, so parse the
+        # verbose POWER block for the "Current/Default/Min/Max Power Limit" lines.
+        try:
+            out = subprocess.run(["nvidia-smi", "-q", "-d", "POWER"],
+                                 capture_output=True, text=True, timeout=4)
+            if out.returncode != 0:
+                return None
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+        def first(label):
+            for line in out.stdout.splitlines():
+                if label in line:
+                    val = line.split(":", 1)[-1].strip().split()[0]
+                    try:
+                        return round(float(val))
+                    except (ValueError, IndexError):
+                        continue
+            return None
+        result = {
+            "limit": first("Current Power Limit"),
+            "default": first("Default Power Limit"),
+            "min": first("Min Power Limit"),
+            "max": first("Max Power Limit"),
+        }
+        self._gpu_pwr_cache = result
+        self._gpu_pwr_ts = now
+        return result
+
+    def _pl_write(self, watts: int):
+        """Run nvidia-smi -pl and classify the result. Returns (ok, unsupported)."""
+        try:
+            out = subprocess.run(["nvidia-smi", "-pl", str(int(watts))],
+                                 capture_output=True, text=True, timeout=8)
+        except (subprocess.SubprocessError, OSError):
+            return False, False
+        txt = (out.stdout + out.stderr).lower()
+        # nvidia-smi prints "not supported in current scope" and still exits 0 on
+        # laptop GPUs whose limit is locked by firmware/Dynamic Boost.
+        unsupported = "not supported" in txt
+        ok = out.returncode == 0 and not unsupported and "insufficient" not in txt
+        return ok, unsupported
+
+    def gpu_power_settable(self) -> bool:
+        """Whether the GPU power limit can actually be changed (probed once by
+        writing the current value, which is a no-op when it succeeds)."""
+        if self._gpu_settable is not None:
+            return self._gpu_settable
+        if not self.has_nvidia:
+            self._gpu_settable = False
+            return False
+        gp = self.get_gpu_power()
+        if not gp or not gp.get("limit"):
+            self._gpu_settable = False
+            return False
+        ok, unsupported = self._pl_write(gp["limit"])
+        self._gpu_settable = ok and not unsupported
+        return self._gpu_settable
+
+    def set_gpu_power_limit(self, watts: float) -> bool:
+        if not self.has_nvidia:
+            return False
+        ok, unsupported = self._pl_write(int(watts))
+        if unsupported:
+            self._gpu_settable = False
+        self._gpu_pwr_cache = None  # force re-read next time
+        return ok
+
+    def power_snapshot(self) -> dict:
+        return {
+            "ac_online": self.ac_online(),
+            "epp": self.get_epp(),
+            "epp_choices": self.epp_choices(),
+            "governor": self.get_governor(),
+            "governor_choices": self.governor_choices(),
+            "cpu_power": self.get_cpu_power(),
+            "gpu_power": self.get_gpu_power(),
+            "gpu_settable": self.gpu_power_settable() if self.has_nvidia else False,
+        }
+
     # -- summary for clients ----------------------------------------------
 
     def snapshot(self) -> dict:
@@ -331,4 +502,5 @@ class Hardware:
             "cpu_temp": self.cpu_temp(),
             "gpu_temp": self.gpu_temp(),
             "group_fans": self.group_fans,
+            "power": self.power_snapshot(),
         }

@@ -33,13 +33,30 @@ class ControlEngine:
         # we settled on, per group.  Prevents fan hunting on tiny temp wobble.
         self._last_eval_temp: dict[str, float] = {}
         self._last_boost: dict[str, float] = {}
+        self._last_ac: bool | None = None  # for AC-change auto-profile detection
+        self._gpu_managed = False          # did we apply a GPU power override?
+        self._pl_managed: dict[str, bool] = {}   # per-PL "we set an override"
+        self._rapl_defaults: dict[str, int] = {}  # firmware RAPL limits at startup
+        self._epp_managed = False
+        self._gov_managed = False
+        self._epp_default: str | None = None     # firmware EPP/governor at startup
+        self._gov_default: str | None = None
         self._wake = threading.Event()  # nudge the loop after a command
         self._thread: threading.Thread | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        # Capture firmware RAPL limits before applying any override, so releasing
+        # a CPU power override can restore them.
+        cp = self.hw.get_cpu_power()
+        if cp.get("available"):
+            self._rapl_defaults = {"pl1": cp.get("pl1"), "pl2": cp.get("pl2")}
+        self._epp_default = self.hw.get_epp()
+        self._gov_default = self.hw.get_governor()
+        self._check_auto(force=True)
         self.apply_control(force=True)
+        self.apply_power(force=True)
         self._thread = threading.Thread(target=self._run, name="awccd-control",
                                         daemon=True)
         self._thread.start()
@@ -60,7 +77,9 @@ class ControlEngine:
 
     def tick(self) -> None:
         with self._lock:
+            self._check_auto()      # may change profile/mode when AC toggles
             self.apply_control()
+            self.apply_power()
             snap = self.hw.snapshot()
         state = self._build_state(snap)
         with self._state_lock:
@@ -122,6 +141,83 @@ class ControlEngine:
             return
         self.hw.set_group_boost(group, pct)
 
+    # -- power overrides ---------------------------------------------------
+
+    def apply_power(self, force: bool = False) -> None:
+        """Enforce the user's power overrides. Fields set to None are left to
+        the firmware/platform_profile. Caller holds self._lock."""
+        p = self.cfg.power
+
+        gl = p.get("gpu_limit_w")
+        if gl is not None and self.hw.gpu_power_settable():
+            cur = (self.hw.get_gpu_power() or {}).get("limit")
+            if force or cur != gl:
+                self.hw.set_gpu_power_limit(gl)
+            self._gpu_managed = True
+        elif self._gpu_managed:
+            # Override released: restore the firmware default limit once.
+            gp = self.hw.get_gpu_power() or {}
+            if gp.get("default"):
+                self.hw.set_gpu_power_limit(gp["default"])
+            self._gpu_managed = False
+
+        epp = p.get("cpu_epp")
+        if epp:
+            if force or self.hw.get_epp() != epp:
+                self.hw.set_epp(epp)
+            self._epp_managed = True
+        elif self._epp_managed:
+            if self._epp_default and self.hw.get_epp() != self._epp_default:
+                self.hw.set_epp(self._epp_default)
+            self._epp_managed = False
+
+        gov = p.get("cpu_governor")
+        if gov:
+            if force or self.hw.get_governor() != gov:
+                self.hw.set_governor(gov)
+            self._gov_managed = True
+        elif self._gov_managed:
+            if self._gov_default and self.hw.get_governor() != self._gov_default:
+                self.hw.set_governor(self._gov_default)
+            self._gov_managed = False
+
+        need_pl = (p.get("cpu_pl1_w") or p.get("cpu_pl2_w")
+                   or any(self._pl_managed.values()))
+        cpu_pwr = self.hw.get_cpu_power() if need_pl else {}
+        for which, field in (("pl1", "cpu_pl1_w"), ("pl2", "cpu_pl2_w")):
+            w = p.get(field)
+            if w is not None:
+                if force or cpu_pwr.get(which) != w:
+                    self.hw.set_cpu_power(which, w)
+                self._pl_managed[which] = True
+            elif self._pl_managed.get(which):
+                # Override released: restore the firmware limit captured at start.
+                dflt = self._rapl_defaults.get(which)
+                if dflt and cpu_pwr.get(which) != dflt:
+                    self.hw.set_cpu_power(which, dflt)
+                self._pl_managed[which] = False
+
+    # -- auto-profiles (AC / battery) -------------------------------------
+
+    def _check_auto(self, force: bool = False) -> None:
+        """When enabled, apply a profile/mode as the AC power state changes."""
+        auto = self.cfg.auto
+        if not auto.get("ac_enabled"):
+            self._last_ac = None
+            return
+        ac = self.hw.ac_online()
+        if ac is None:
+            return
+        if not force and ac == self._last_ac:
+            return
+        self._last_ac = ac
+        prof = auto.get("ac_profile") if ac else auto.get("battery_profile")
+        mode = auto.get("ac_mode") if ac else auto.get("battery_mode")
+        if prof:
+            self.cfg.set_profile(prof)
+        if mode:
+            self.cfg.set_mode(mode)
+
     # -- state for clients -------------------------------------------------
 
     def _build_state(self, snap: dict) -> dict:
@@ -134,6 +230,8 @@ class ControlEngine:
             "hysteresis_c": self.cfg.hysteresis,
             "manual": dict(self.cfg.data["manual"]),
             "curves": {g: self.cfg.curve(g) for g in protocol.GROUPS},
+            "power": dict(self.cfg.power),
+            "auto": dict(self.cfg.auto),
         }
         state["target_boost"] = {g: round(self._last_boost.get(g, 0.0))
                                  for g in protocol.GROUPS}
@@ -176,6 +274,13 @@ class ControlEngine:
                         self.apply_control(force=True)
                 elif cmd == protocol.CMD_SET_POLL:
                     self.cfg.set_poll(req.get("interval", 2.0))
+                elif cmd == protocol.CMD_SET_POWER:
+                    self.cfg.set_power(req.get("field"), req.get("value"))
+                    self.apply_power(force=True)
+                elif cmd == protocol.CMD_SET_AUTO:
+                    self.cfg.set_auto(req.get("auto") or {})
+                    self._check_auto(force=True)
+                    self.apply_control(force=True)
                 elif cmd == protocol.CMD_SUBSCRIBE:
                     return {"ok": True, "subscribe": True}
                 else:
@@ -183,6 +288,12 @@ class ControlEngine:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-        # Refresh cached state immediately so the reply reflects the change.
+        # Build a fresh state so the reply reflects the change immediately
+        # (the cached state is from the previous tick), and refresh the cache.
         self._wake.set()
-        return self.get_state()
+        with self._lock:
+            snap = self.hw.snapshot()
+        fresh = self._build_state(snap)
+        with self._state_lock:
+            self._state = fresh
+        return fresh

@@ -10,6 +10,13 @@ Talks to the awccd daemon over its Unix socket. Examples:
     awcc-cli boost gpu 80           # manual: set GPU fans to 80% boost
     awcc-cli curve cpu              # print the CPU fan curve
     awcc-cli curve cpu 40:0 60:30 80:70 90:100   # set the CPU fan curve
+
+    awcc-cli gpu-power 150          # cap GPU to 150W ('auto' to release)
+    awcc-cli cpu-epp performance    # set CPU energy-perf preference ('auto' to release)
+    awcc-cli cpu-gov performance    # set CPU governor
+    awcc-cli cpu-pl pl1 65          # set CPU package power limit PL1 (watts)
+    awcc-cli auto on ac=performance battery=quiet   # auto profile by AC state
+    awcc-cli auto off
 """
 
 from __future__ import annotations
@@ -64,6 +71,26 @@ def print_status(state: dict) -> None:
     if tgt:
         print(f"  {DIM}target boost -> cpu {tgt.get('cpu', 0)}%  "
               f"gpu {tgt.get('gpu', 0)}%{RST}")
+
+    pw = state.get("power") or {}
+    if pw:
+        print(f"\n{BOLD}Power{RST}")
+        gp = pw.get("gpu_power") or {}
+        if gp.get("limit") is not None:
+            print(f"  {'GPU limit':<14} {CYN}{gp['limit']}W{RST}  "
+                  f"{DIM}(range {gp.get('min')}-{gp.get('max')}W, "
+                  f"default {gp.get('default')}W){RST}")
+        print(f"  {'CPU EPP':<14} {pw.get('epp')}   "
+              f"{'governor':<9} {pw.get('governor')}")
+        cp = pw.get("cpu_power") or {}
+        if cp.get("available"):
+            print(f"  {'CPU power':<14} PL1 {cp.get('pl1')}W  PL2 {cp.get('pl2')}W")
+        ac = pw.get("ac_online")
+        print(f"  {'AC power':<14} {'plugged in' if ac else 'on battery'}")
+    ov = (state.get("config") or {}).get("power") or {}
+    managed = {k: v for k, v in ov.items() if v is not None}
+    if managed:
+        print(f"  {DIM}overrides: {managed}{RST}")
 
 
 def cmd_status(c: Client, _args) -> int:
@@ -141,6 +168,61 @@ def cmd_curve(c: Client, args) -> int:
     return 0 if r.get("ok") else 1
 
 
+def _apply(c, field, value, label):
+    r = c.set_power(field, value)
+    if r.get("ok"):
+        print(f"{field} -> {r.get('config', {}).get('power', {}).get(field)}")
+        return 0
+    print(f"error: {r.get('error')}")
+    return 1
+
+
+def cmd_gpu_power(c, args):
+    if not args:
+        print("usage: awcc-cli gpu-power <watts|auto>")
+        return 2
+    return _apply(c, "gpu_limit_w", args[0], "GPU power")
+
+
+def cmd_cpu_epp(c, args):
+    if not args:
+        state = c.get_state()
+        print("EPP choices:", " ".join((state.get("power") or {}).get("epp_choices", [])))
+        return 0
+    return _apply(c, "cpu_epp", args[0], "EPP")
+
+
+def cmd_cpu_gov(c, args):
+    if not args:
+        print("usage: awcc-cli cpu-gov <performance|powersave|auto>")
+        return 2
+    return _apply(c, "cpu_governor", args[0], "governor")
+
+
+def cmd_cpu_pl(c, args):
+    if len(args) < 2:
+        print("usage: awcc-cli cpu-pl <pl1|pl2> <watts|auto>")
+        return 2
+    field = "cpu_pl1_w" if args[0] == "pl1" else "cpu_pl2_w"
+    return _apply(c, field, args[1], "CPU power")
+
+
+def cmd_auto(c, args):
+    if not args or args[0] not in ("on", "off"):
+        print("usage: awcc-cli auto <on|off> [ac=<profile>] [battery=<profile>]")
+        return 2
+    updates = {"ac_enabled": args[0] == "on"}
+    for tok in args[1:]:
+        if tok.startswith("ac="):
+            updates["ac_profile"] = tok[3:]
+        elif tok.startswith("battery="):
+            updates["battery_profile"] = tok[8:]
+    r = c.set_auto(updates)
+    print(f"auto -> {r.get('config', {}).get('auto')}" if r.get("ok")
+          else f"error: {r.get('error')}")
+    return 0 if r.get("ok") else 1
+
+
 COMMANDS = {
     "status": cmd_status,
     "watch": cmd_watch,
@@ -148,6 +230,11 @@ COMMANDS = {
     "mode": cmd_mode,
     "boost": cmd_boost,
     "curve": cmd_curve,
+    "gpu-power": cmd_gpu_power,
+    "cpu-epp": cmd_cpu_epp,
+    "cpu-gov": cmd_cpu_gov,
+    "cpu-pl": cmd_cpu_pl,
+    "auto": cmd_auto,
 }
 
 

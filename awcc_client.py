@@ -30,6 +30,8 @@ CMD_SET_PROFILE = "set_profile"
 CMD_SET_CURVE = "set_curve"
 CMD_SET_MANUAL = "set_manual"
 CMD_SET_POLL = "set_poll"
+CMD_SET_POWER = "set_power"
+CMD_SET_AUTO = "set_auto"
 CMD_PING = "ping"
 
 
@@ -123,6 +125,12 @@ class Client:
     def set_manual(self, group: str, boost_pct: float) -> dict:
         return self.request({"cmd": CMD_SET_MANUAL, "group": group,
                              "boost_pct": boost_pct})
+
+    def set_power(self, field: str, value) -> dict:
+        return self.request({"cmd": CMD_SET_POWER, "field": field, "value": value})
+
+    def set_auto(self, updates: dict) -> dict:
+        return self.request({"cmd": CMD_SET_AUTO, "auto": updates})
 
     def ping(self) -> bool:
         try:

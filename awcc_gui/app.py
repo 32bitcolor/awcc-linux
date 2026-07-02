@@ -122,6 +122,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._stack.add_titled_with_icon(
             self._build_curves(), "curves", "Curves", "network-cellular-signal-good-symbolic")
         self._stack.add_titled_with_icon(
+            self._build_power(), "power", "Power", "power-profile-performance-symbolic")
+        self._stack.add_titled_with_icon(
             self._build_settings(), "settings", "Settings", "emblem-system-symbolic")
 
         toolbar.set_content(self._stack)
@@ -277,6 +279,137 @@ class MainWindow(Adw.ApplicationWindow):
             page.add(g)
         return page
 
+    # -- power page --------------------------------------------------------
+
+    def _build_power(self) -> Gtk.Widget:
+        page = Adw.PreferencesPage()
+        self._gpu_range_set = False
+        self._gpu_send_id = 0
+        self._epp_values: list = []      # index -> epp string (index 0 = Auto)
+        self._gov_values: list = []
+
+        # GPU power limit.
+        self._gpu_group = Adw.PreferencesGroup(
+            title="Graphics power (NVIDIA)",
+            description="Cap the GPU board power. Lower = cooler and quieter; "
+                        "higher = more performance headroom.")
+        self._gpu_override = Adw.SwitchRow(
+            title="Limit GPU power",
+            subtitle="Off = firmware default")
+        self._gpu_override.connect("notify::active", self._on_gpu_override)
+        self._gpu_group.add(self._gpu_override)
+
+        self._gpu_row = Adw.ActionRow(title="Power limit")
+        self._gpu_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 5, 175, 5)
+        self._gpu_scale.set_size_request(300, -1)
+        self._gpu_scale.set_hexpand(True)
+        self._gpu_scale.set_draw_value(True)
+        self._gpu_scale.set_value_pos(Gtk.PositionType.RIGHT)
+        self._gpu_scale.connect("value-changed", self._on_gpu_scale)
+        self._gpu_row.add_suffix(self._gpu_scale)
+        self._gpu_group.add(self._gpu_row)
+        page.add(self._gpu_group)
+
+        # CPU performance.
+        gcpu = Adw.PreferencesGroup(
+            title="CPU performance",
+            description="Energy-performance preference and frequency governor. "
+                        "'Auto' leaves them to the selected thermal profile.")
+        self._epp_row = Adw.ComboRow(title="Energy performance preference")
+        self._epp_row.connect("notify::selected", self._on_epp)
+        gcpu.add(self._epp_row)
+        self._gov_row = Adw.ComboRow(title="Frequency governor")
+        self._gov_row.connect("notify::selected", self._on_gov)
+        gcpu.add(self._gov_row)
+        page.add(gcpu)
+
+        # Advanced: CPU package power limits.
+        gadv = Adw.PreferencesGroup(
+            title="CPU package power (advanced)",
+            description="Intel RAPL limits. PL1 is sustained power, PL2 is the "
+                        "short turbo burst. Lower to reduce heat; raising may "
+                        "increase temperatures.")
+        self._pl_override = Adw.SwitchRow(
+            title="Override CPU power limits", subtitle="Off = firmware default")
+        self._pl_override.connect("notify::active", self._on_pl_override)
+        gadv.add(self._pl_override)
+        self._pl1_row = Adw.SpinRow.new_with_range(10, 250, 5)
+        self._pl1_row.set_title("PL1 — sustained (W)")
+        self._pl1_row.connect("notify::value", self._on_pl_value, "cpu_pl1_w")
+        gadv.add(self._pl1_row)
+        self._pl2_row = Adw.SpinRow.new_with_range(10, 300, 5)
+        self._pl2_row.set_title("PL2 — turbo (W)")
+        self._pl2_row.connect("notify::value", self._on_pl_value, "cpu_pl2_w")
+        gadv.add(self._pl2_row)
+        self._pl_group = gadv
+        page.add(gadv)
+
+        return page
+
+    # -- power handlers ----------------------------------------------------
+
+    def _on_gpu_override(self, row, _p):
+        if self._suppress:
+            return
+        if row.get_active():
+            self.backend.send({"cmd": "set_power", "field": "gpu_limit_w",
+                               "value": int(self._gpu_scale.get_value())})
+        else:
+            self.backend.send({"cmd": "set_power", "field": "gpu_limit_w",
+                               "value": None})
+        self._gpu_row.set_sensitive(row.get_active())
+
+    def _on_gpu_scale(self, scale):
+        if self._suppress or not self._gpu_override.get_active():
+            return
+        # nvidia-smi is slow, so debounce: only send after the value settles.
+        if self._gpu_send_id:
+            GLib.source_remove(self._gpu_send_id)
+        val = int(scale.get_value())
+        self._gpu_send_id = GLib.timeout_add(
+            350, lambda: self._send_gpu(val))
+
+    def _send_gpu(self, val):
+        self._gpu_send_id = 0
+        self.backend.send({"cmd": "set_power", "field": "gpu_limit_w", "value": val})
+        return False
+
+    def _on_epp(self, row, _p):
+        if self._suppress:
+            return
+        idx = row.get_selected()
+        val = None if idx == 0 else self._epp_values[idx]
+        self.backend.send({"cmd": "set_power", "field": "cpu_epp", "value": val})
+
+    def _on_gov(self, row, _p):
+        if self._suppress:
+            return
+        idx = row.get_selected()
+        val = None if idx == 0 else self._gov_values[idx]
+        self.backend.send({"cmd": "set_power", "field": "cpu_governor", "value": val})
+
+    def _on_pl_override(self, row, _p):
+        if self._suppress:
+            return
+        on = row.get_active()
+        self._pl1_row.set_sensitive(on)
+        self._pl2_row.set_sensitive(on)
+        if on:
+            self.backend.send({"cmd": "set_power", "field": "cpu_pl1_w",
+                               "value": int(self._pl1_row.get_value())})
+            self.backend.send({"cmd": "set_power", "field": "cpu_pl2_w",
+                               "value": int(self._pl2_row.get_value())})
+        else:
+            for f in ("cpu_pl1_w", "cpu_pl2_w"):
+                self.backend.send({"cmd": "set_power", "field": f, "value": None})
+
+    def _on_pl_value(self, row, _p, field):
+        if self._suppress or not self._pl_override.get_active():
+            return
+        self.backend.send({"cmd": "set_power", "field": field,
+                           "value": int(row.get_value())})
+
     # -- settings page -----------------------------------------------------
 
     def _build_settings(self) -> Gtk.Widget:
@@ -307,6 +440,25 @@ class MainWindow(Adw.ApplicationWindow):
 
         page.add(g)
 
+        # Automation (daemon-side): switch profile on AC/battery.
+        self._auto_profiles: list = []   # index -> profile name (0 = No change)
+        ga = Adw.PreferencesGroup(
+            title="Automation",
+            description="Automatically switch the thermal profile when you plug "
+                        "in or unplug the charger.")
+        self._auto_switch = Adw.SwitchRow(
+            title="Switch profile on AC / battery")
+        self._auto_switch.connect("notify::active", self._on_auto_switch)
+        ga.add(self._auto_switch)
+        self._auto_ac = Adw.ComboRow(title="When plugged in")
+        self._auto_ac.connect("notify::selected", self._on_auto_ac)
+        ga.add(self._auto_ac)
+        self._auto_bat = Adw.ComboRow(title="On battery")
+        self._auto_bat.connect("notify::selected", self._on_auto_bat)
+        ga.add(self._auto_bat)
+        self._auto_group = ga
+        page.add(ga)
+
         info = Adw.PreferencesGroup(
             description="Closing the window keeps AWCC-Linux running in the "
                         "system tray. Use the tray menu or Quit to exit fully.")
@@ -315,6 +467,31 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_autostart_toggled(self, row, _param):
         Settings.set_autostart(row.get_active())
+
+    # -- automation handlers ----------------------------------------------
+
+    def _on_auto_switch(self, row, _p):
+        if self._suppress:
+            return
+        self.backend.send({"cmd": "set_auto",
+                           "auto": {"ac_enabled": row.get_active()}})
+        self._auto_ac.set_sensitive(row.get_active())
+        self._auto_bat.set_sensitive(row.get_active())
+
+    def _auto_combo_value(self, idx):
+        return None if idx == 0 else self._auto_profiles[idx]
+
+    def _on_auto_ac(self, row, _p):
+        if self._suppress:
+            return
+        self.backend.send({"cmd": "set_auto",
+                           "auto": {"ac_profile": self._auto_combo_value(row.get_selected())}})
+
+    def _on_auto_bat(self, row, _p):
+        if self._suppress:
+            return
+        self.backend.send({"cmd": "set_auto",
+                           "auto": {"battery_profile": self._auto_combo_value(row.get_selected())}})
 
     def _on_label_changed(self, row, _param):
         idx = row.get_selected()
@@ -370,6 +547,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._sync_fans(state)
         self._sync_sensors(state)
         self._sync_curves(state)
+        self._sync_power(state)
+        self._sync_automation(state)
         self._sync_tray(state)
         return False
 
@@ -475,6 +654,95 @@ class MainWindow(Adw.ApplicationWindow):
         # Always update the live temp marker.
         self._editors["cpu"].set_current_temp(state.get("cpu_temp"))
         self._editors["gpu"].set_current_temp(state.get("gpu_temp"))
+
+    def _sync_power(self, state):
+        pw = state.get("power") or {}
+        cfg = (state.get("config") or {}).get("power") or {}
+        self._suppress = True
+
+        # GPU power limit.
+        gp = pw.get("gpu_power") or {}
+        has_gpu = bool(state.get("has_nvidia") and gp.get("max"))
+        settable = bool(pw.get("gpu_settable"))
+        self._gpu_group.set_visible(has_gpu)
+        if has_gpu and not self._gpu_range_set:
+            self._gpu_scale.set_range(gp["min"], gp["max"])
+            for m in {gp["min"], gp.get("default") or gp["min"], gp["max"]}:
+                self._gpu_scale.add_mark(m, Gtk.PositionType.BOTTOM, f"{m}W")
+            self._gpu_range_set = True
+        self._gpu_override.set_sensitive(settable)
+        if not settable:
+            self._gpu_override.set_subtitle(
+                "Locked by firmware / Dynamic Boost on this GPU")
+            self._gpu_override.set_active(False)
+            self._gpu_row.set_sensitive(False)
+        else:
+            self._gpu_override.set_subtitle("Off = firmware default")
+            gov_ov = cfg.get("gpu_limit_w")
+            self._gpu_override.set_active(gov_ov is not None)
+            self._gpu_row.set_sensitive(gov_ov is not None)
+            val = gov_ov if gov_ov is not None else (
+                gp.get("limit") or gp.get("default") or gp.get("min"))
+            if val is not None:
+                self._gpu_scale.set_value(val)
+
+        # EPP / governor combos (Auto + hardware choices).
+        self._sync_combo(self._epp_row, "_epp_values", pw.get("epp_choices"),
+                         cfg.get("cpu_epp"), f"currently: {pw.get('epp')}")
+        self._sync_combo(self._gov_row, "_gov_values", pw.get("governor_choices"),
+                         cfg.get("cpu_governor"), f"currently: {pw.get('governor')}")
+
+        # CPU package power limits.
+        cp = pw.get("cpu_power") or {}
+        self._pl_group.set_visible(bool(cp.get("available")))
+        pl1, pl2 = cfg.get("cpu_pl1_w"), cfg.get("cpu_pl2_w")
+        pl_on = pl1 is not None or pl2 is not None
+        self._pl_override.set_active(pl_on)
+        self._pl1_row.set_sensitive(pl_on)
+        self._pl2_row.set_sensitive(pl_on)
+        if (pl1 or cp.get("pl1")) is not None:
+            self._pl1_row.set_value(pl1 if pl1 is not None else cp.get("pl1"))
+        if (pl2 or cp.get("pl2")) is not None:
+            self._pl2_row.set_value(pl2 if pl2 is not None else cp.get("pl2"))
+        self._suppress = False
+
+    def _sync_combo(self, row, attr, choices, current, subtitle):
+        """Populate a ComboRow with 'Auto' + choices and select `current`."""
+        choices = list(choices or [])
+        values = getattr(self, attr, [])
+        if values[1:] != choices:
+            values = [None] + choices
+            setattr(self, attr, values)
+            model = Gtk.StringList()
+            model.append("Auto (profile)")
+            for c in choices:
+                model.append(c)
+            row.set_model(model)
+        row.set_selected(values.index(current) if current in values else 0)
+        row.set_subtitle(subtitle)
+
+    def _sync_automation(self, state):
+        auto = (state.get("config") or {}).get("auto") or {}
+        choices = list(state.get("profile_choices") or [])
+        self._suppress = True
+        if self._auto_profiles[1:] != choices:
+            self._auto_profiles = [None] + choices
+            for combo in (self._auto_ac, self._auto_bat):
+                model = Gtk.StringList()
+                model.append("No change")
+                for c in choices:
+                    model.append(PROFILE_INFO.get(c, (c.title(), ""))[0])
+                combo.set_model(model)
+        en = bool(auto.get("ac_enabled"))
+        self._auto_switch.set_active(en)
+        self._auto_ac.set_sensitive(en)
+        self._auto_bat.set_sensitive(en)
+        acp, bap = auto.get("ac_profile"), auto.get("battery_profile")
+        self._auto_ac.set_selected(
+            self._auto_profiles.index(acp) if acp in self._auto_profiles else 0)
+        self._auto_bat.set_selected(
+            self._auto_profiles.index(bap) if bap in self._auto_profiles else 0)
+        self._suppress = False
 
     def _sync_tray(self, state):
         self.tray.update()

@@ -66,6 +66,11 @@ class Config:
             protocol.GROUP_GPU: _clamp_points(
                 (loaded.get("curves") or {}).get(protocol.GROUP_GPU)),
         }
+        # Deep-merge power/auto so new keys survive and old configs upgrade.
+        for section in ("power", "auto"):
+            base = copy.deepcopy(protocol.DEFAULT_CONFIG[section])
+            base.update(loaded.get(section) or {})
+            merged[section] = base
         if merged.get("mode") not in protocol.MODES:
             merged["mode"] = protocol.MODE_PROFILE
         self.data = merged
@@ -134,3 +139,40 @@ class Config:
         self.data["poll_interval"] = max(0.5, min(10.0, float(interval)))
         self.save()
         return self.data["poll_interval"]
+
+    # -- power / auto ------------------------------------------------------
+
+    @property
+    def power(self) -> dict:
+        return self.data["power"]
+
+    @property
+    def auto(self) -> dict:
+        return self.data["auto"]
+
+    def set_power(self, field: str, value):
+        if field not in protocol.POWER_FIELDS:
+            return None
+        if value in (None, "", "auto"):
+            self.data["power"][field] = None
+        elif field in ("cpu_epp", "cpu_governor"):
+            self.data["power"][field] = str(value)
+        else:  # numeric watt fields
+            try:
+                self.data["power"][field] = max(1, int(float(value)))
+            except (TypeError, ValueError):
+                self.data["power"][field] = None
+        self.save()
+        return self.data["power"][field]
+
+    def set_auto(self, updates: dict) -> dict:
+        auto = self.data["auto"]
+        for k in ("ac_enabled",):
+            if k in updates:
+                auto[k] = bool(updates[k])
+        for k in ("ac_profile", "ac_mode", "battery_profile", "battery_mode"):
+            if k in updates:
+                v = updates[k]
+                auto[k] = None if v in (None, "", "none") else str(v)
+        self.save()
+        return auto
