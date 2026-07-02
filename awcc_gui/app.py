@@ -19,6 +19,9 @@ from awcc_gui import __version__  # noqa: E402
 from awcc_gui.backend import Backend  # noqa: E402
 from awcc_gui.curve_editor import FanCurveEditor  # noqa: E402
 from awcc_gui.graph import HistoryGraph  # noqa: E402
+from awcc_gui.settings import (  # noqa: E402
+    LABEL_CHOICES, LABEL_NAMES, Settings,
+)
 from awcc_gui.tray import Tray  # noqa: E402
 
 APP_ID = "io.github.awcclinux.Awcc"
@@ -74,6 +77,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_default_size(760, 720)
 
         self.state: dict = {}
+        self.settings = Settings()
         self._curves_loaded = False
         self._profile_buttons: dict[str, Gtk.ToggleButton] = {}
         self._mode_buttons: dict[str, Gtk.ToggleButton] = {}
@@ -107,6 +111,8 @@ class MainWindow(Adw.ApplicationWindow):
             self._build_fans(), "fans", "Fans", "weather-windy-symbolic")
         self._stack.add_titled_with_icon(
             self._build_curves(), "curves", "Curves", "network-cellular-signal-good-symbolic")
+        self._stack.add_titled_with_icon(
+            self._build_settings(), "settings", "Settings", "emblem-system-symbolic")
 
         toolbar.set_content(self._stack)
 
@@ -260,6 +266,51 @@ class MainWindow(Adw.ApplicationWindow):
             g.add(reset)
             page.add(g)
         return page
+
+    # -- settings page -----------------------------------------------------
+
+    def _build_settings(self) -> Gtk.Widget:
+        page = Adw.PreferencesPage()
+
+        g = Adw.PreferencesGroup(
+            title="Startup and Tray",
+            description="These preferences are per-user and take effect "
+                        "immediately.")
+
+        self._autostart_row = Adw.SwitchRow(
+            title="Start on login",
+            subtitle="Launch automatically at login, minimized to the tray")
+        self._autostart_row.set_active(Settings.is_autostart_enabled())
+        self._autostart_row.connect("notify::active", self._on_autostart_toggled)
+        g.add(self._autostart_row)
+
+        self._label_row = Adw.ComboRow(
+            title="Tray temperature label",
+            subtitle="Show live temperatures next to the tray icon")
+        model = Gtk.StringList()
+        for key in LABEL_CHOICES:
+            model.append(LABEL_NAMES[key])
+        self._label_row.set_model(model)
+        self._label_row.set_selected(LABEL_CHOICES.index(self.settings.tray_label))
+        self._label_row.connect("notify::selected", self._on_label_changed)
+        g.add(self._label_row)
+
+        page.add(g)
+
+        info = Adw.PreferencesGroup(
+            description="Closing the window keeps AWCC-Linux running in the "
+                        "system tray. Use the tray menu or Quit to exit fully.")
+        page.add(info)
+        return page
+
+    def _on_autostart_toggled(self, row, _param):
+        Settings.set_autostart(row.get_active())
+
+    def _on_label_changed(self, row, _param):
+        idx = row.get_selected()
+        if 0 <= idx < len(LABEL_CHOICES):
+            self.settings.tray_label = LABEL_CHOICES[idx]
+            self.tray.update()
 
     # -- event handlers (user -> daemon) -----------------------------------
 
@@ -449,12 +500,14 @@ class MainWindow(Adw.ApplicationWindow):
 
 
 class AwccApp(Adw.Application):
-    def __init__(self):
+    def __init__(self, start_hidden=False):
         super().__init__(application_id=APP_ID)
         self._win = None
+        self._start_hidden = start_hidden
 
     def do_activate(self):
-        if not self._win:
+        first = self._win is None
+        if first:
             self._win = MainWindow(self)
             from gi.repository import Gio
             about = Gio.SimpleAction.new("about", None)
@@ -463,7 +516,12 @@ class AwccApp(Adw.Application):
             quit_act = Gio.SimpleAction.new("quit", None)
             quit_act.connect("activate", lambda *a: self._win.quit_app())
             self.add_action(quit_act)
-        # Relaunching (e.g. clicking the desktop icon) restores from the tray.
+        # On a --hidden autostart, stay in the tray: the window exists (so the
+        # app keeps running and the tray is live) but is not shown.
+        if first and self._start_hidden:
+            self._start_hidden = False
+            return
+        # Any activation (including relaunching the desktop icon) restores it.
         self._win.show_from_tray()
 
     def _on_about(self, *_a):
@@ -481,8 +539,11 @@ class AwccApp(Adw.Application):
 
 
 def main():
-    app = AwccApp()
-    return app.run(sys.argv)
+    # Parse our own flags; don't forward them to GApplication (which would warn
+    # about unknown options and try to treat them as files to open).
+    start_hidden = "--hidden" in sys.argv[1:]
+    app = AwccApp(start_hidden=start_hidden)
+    return app.run([sys.argv[0]] if sys.argv else [])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 
+import cairo
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -49,12 +50,16 @@ SNI_XML = f"""
     <property name="Title" type="s" access="read"/>
     <property name="Status" type="s" access="read"/>
     <property name="IconName" type="s" access="read"/>
+    <property name="IconPixmap" type="a(iiay)" access="read"/>
     <property name="IconThemePath" type="s" access="read"/>
     <property name="OverlayIconName" type="s" access="read"/>
     <property name="AttentionIconName" type="s" access="read"/>
     <property name="ToolTip" type="(sa(iiay)ss)" access="read"/>
     <property name="ItemIsMenu" type="b" access="read"/>
     <property name="Menu" type="o" access="read"/>
+    <property name="XAyatanaLabel" type="s" access="read"/>
+    <property name="XAyatanaLabelGuide" type="s" access="read"/>
+    <property name="XAyatanaOrderingIndex" type="u" access="read"/>
     <method name="Activate"><arg name="x" type="i"/><arg name="y" type="i"/></method>
     <method name="SecondaryActivate"><arg name="x" type="i"/><arg name="y" type="i"/></method>
     <method name="ContextMenu"><arg name="x" type="i"/><arg name="y" type="i"/></method>
@@ -63,6 +68,10 @@ SNI_XML = f"""
     <signal name="NewToolTip"/>
     <signal name="NewStatus"><arg name="status" type="s"/></signal>
     <signal name="NewTitle"/>
+    <signal name="XAyatanaNewLabel">
+      <arg name="label" type="s"/>
+      <arg name="guide" type="s"/>
+    </signal>
   </interface>
 </node>
 """
@@ -126,6 +135,7 @@ class Tray:
         self._item_reg = 0
         self._menu_reg = 0
         self._actions: dict[int, tuple] = {}
+        self._last_label = None
         self.available = False
 
         self.bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
@@ -177,10 +187,86 @@ class Tray:
 
     # -- state / refresh ---------------------------------------------------
 
+    def _label_text(self):
+        st = self.window.state or {}
+        settings = getattr(self.window, "settings", None)
+        if settings is None:
+            return ""
+        return settings.format_label(st.get("cpu_temp"), st.get("gpu_temp"))
+
+    def _temp_color(self):
+        st = self.window.state or {}
+        temps = [t for t in (st.get("cpu_temp"), st.get("gpu_temp")) if t is not None]
+        hot = max(temps) if temps else 0
+        if hot < 65:
+            return (0.55, 0.90, 0.55)   # green
+        if hot < 85:
+            return (0.98, 0.80, 0.35)   # amber
+        return (0.96, 0.45, 0.45)       # red
+
+    def _render_icon_pixmap(self, text):
+        """Render `text` to an SNI IconPixmap (w, h, big-endian ARGB32 bytes).
+
+        This is the reliable way to show live temperatures in the tray: unlike
+        the XAyatanaLabel extension (which some hosts, notably KDE, ignore), an
+        IconPixmap is always rendered. Returns None for empty text.
+        """
+        if not text:
+            return None
+        H = 44
+        font_size = 30
+        measure = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 8, 8))
+        measure.select_font_face("Sans", cairo.FONT_SLANT_NORMAL,
+                                 cairo.FONT_WEIGHT_BOLD)
+        measure.set_font_size(font_size)
+        ext = measure.text_extents(text)
+        W = max(H, int(ext.width + 12))
+
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+        cr = cairo.Context(surf)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(font_size)
+        ext = cr.text_extents(text)
+        x = (W - ext.width) / 2 - ext.x_bearing
+        y = (H - ext.height) / 2 - ext.y_bearing
+        # Shadow for legibility on light or dark panels, then the coloured text.
+        cr.set_source_rgba(0, 0, 0, 0.55)
+        cr.move_to(x + 1.2, y + 1.2)
+        cr.show_text(text)
+        cr.set_source_rgba(*self._temp_color(), 1.0)
+        cr.move_to(x, y)
+        cr.show_text(text)
+        surf.flush()
+
+        data = surf.get_data()
+        stride = surf.get_stride()
+        out = bytearray(W * H * 4)
+        o = 0
+        for row in range(H):
+            base = row * stride
+            for cx in range(W):
+                i = base + cx * 4
+                # Cairo (little-endian ARGB32) is B,G,R,A -> SNI wants A,R,G,B.
+                out[o] = data[i + 3]
+                out[o + 1] = data[i + 2]
+                out[o + 2] = data[i + 1]
+                out[o + 3] = data[i]
+                o += 4
+        return (W, H, bytes(out))
+
     def update(self):
-        """Called when new daemon state arrives; refresh tooltip."""
-        if self.conn and self.available:
-            self._emit(ITEM_PATH, SNI_IFACE, "NewToolTip", None)
+        """Called when new daemon state arrives (or a label pref change);
+        refresh the tooltip and, when the displayed value changes, the icon."""
+        if not (self.conn and self.available):
+            return
+        self._emit(ITEM_PATH, SNI_IFACE, "NewToolTip", None)
+        label = self._label_text()
+        if label != self._last_label:
+            self._last_label = label
+            # Re-render the icon (pixmap number, or fall back to the fan logo).
+            self._emit(ITEM_PATH, SNI_IFACE, "NewIcon", None)
+            self._emit(ITEM_PATH, SNI_IFACE, "XAyatanaNewLabel",
+                       GLib.Variant("(ss)", (label, "88/88°")))
 
     def notify_layout_changed(self):
         self.revision += 1
@@ -219,7 +305,12 @@ class Tray:
         if name == "Status":
             return GLib.Variant("s", "Active")
         if name == "IconName":
-            return GLib.Variant("s", ICON_NAME)
+            # When showing a temperature, blank the name so the host uses our
+            # rendered IconPixmap; otherwise use the themed fan logo.
+            return GLib.Variant("s", "" if self._label_text() else ICON_NAME)
+        if name == "IconPixmap":
+            pm = self._render_icon_pixmap(self._label_text())
+            return GLib.Variant("a(iiay)", [pm] if pm else [])
         if name in ("IconThemePath", "OverlayIconName", "AttentionIconName"):
             return GLib.Variant("s", "")
         if name == "ItemIsMenu":
@@ -229,6 +320,12 @@ class Tray:
         if name == "ToolTip":
             return GLib.Variant("(sa(iiay)ss)",
                                 (ICON_NAME, [], "AWCC-Linux", self._tooltip_text()))
+        if name == "XAyatanaLabel":
+            return GLib.Variant("s", self._label_text())
+        if name == "XAyatanaLabelGuide":
+            return GLib.Variant("s", "88/88°")
+        if name == "XAyatanaOrderingIndex":
+            return GLib.Variant("u", 0)
         return None
 
     def _sni_method(self, conn, sender, path, iface, method, params, invocation):

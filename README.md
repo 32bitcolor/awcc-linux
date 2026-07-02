@@ -27,6 +27,12 @@ fan boost, and fully custom **fan curves** — driven by the mainline
   (StatusNotifierItem, native on KDE Plasma). The tray shows live CPU/GPU temps
   on hover and offers quick thermal-profile and fan-mode switching plus Quit;
   left-click restores the window.
+- **Live tray temperature** — optionally render the current CPU and/or GPU
+  temperature right on the tray icon (colour-coded green/amber/red), so you can
+  watch temps at a glance without opening anything. Drawn as an icon pixmap so
+  it shows even on hosts that ignore the Ayatana label extension.
+- **Start on login** — one toggle in Settings to autostart AWCC-Linux minimized
+  to the tray (writes a standard `~/.config/autostart` entry).
 - **Terminal client** — `awcc-cli` for scripting and headless use.
 - **Safe by design** — fan control uses the driver's *additive* `fanN_boost`
   mechanism. Boost only ever *adds* cooling on top of the embedded controller's
