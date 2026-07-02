@@ -89,19 +89,20 @@ class Settings:
         return f"{c}/{g}°"
 
     def label_entries(self, cpu, gpu):
-        """Lines for the tray icon pixmap: list of (text, temp).
+        """Lines for the tray icon pixmap: list of (temp, kind).
 
-        `both` yields two stacked lines (CPU then GPU) so the icon can stay
-        square and readable rather than a wide, shrunk single line.
+        `kind` is "cpu" or "gpu". `both` yields two stacked entries (CPU then
+        GPU) so the icon can stay square and readable rather than a wide, shrunk
+        single line; the tray adds C/G prefixes to disambiguate them.
         """
         pref = self.tray_label
         out = []
         if pref == LABEL_OFF:
             return out
         if pref in (LABEL_CPU, LABEL_BOTH) and cpu is not None:
-            out.append((f"{cpu:.0f}°", cpu))
+            out.append((cpu, "cpu"))
         if pref in (LABEL_GPU, LABEL_BOTH) and gpu is not None:
-            out.append((f"{gpu:.0f}°", gpu))
+            out.append((gpu, "gpu"))
         return out
 
     # -- autostart ---------------------------------------------------------

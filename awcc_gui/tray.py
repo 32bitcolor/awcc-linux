@@ -204,23 +204,44 @@ class Tray:
             return (0.98, 0.80, 0.35)   # amber
         return (0.96, 0.45, 0.45)       # red
 
+    # Colour of the C/G prefix letters (dim, neutral — the number carries the
+    # temperature colour).
+    PREFIX_RGB = (0.72, 0.74, 0.80)
+    PREFIX_SCALE = 0.66     # prefix letter is smaller than the number
+    SEG_GAP = 0.06          # gap between prefix and number, as a fraction of font
+
     def _label_lines(self):
-        """Lines to draw on the icon: list of (text, rgb). 1 line, or 2 stacked."""
+        """Lines to draw on the icon. Each line is a list of (text, rgb, scale)
+        segments. Single-value modes are one big number; "both" stacks two lines
+        with small C/G prefixes so you can tell them apart."""
         st = self.window.state or {}
         settings = getattr(self.window, "settings", None)
         if settings is None:
             return []
         entries = settings.label_entries(st.get("cpu_temp"), st.get("gpu_temp"))
-        return [(text, self._color_for(temp)) for text, temp in entries]
+        prefixed = len(entries) > 1
+        lines = []
+        for temp, kind in entries:
+            color = self._color_for(temp)
+            if prefixed:
+                # Drop the degree sign here — the C/G prefix already signals a
+                # temperature, and dropping it keeps two stacked lines legible.
+                letter = "C" if kind == "cpu" else "G"
+                lines.append([(letter, self.PREFIX_RGB, self.PREFIX_SCALE),
+                              (f"{temp:.0f}", color, 1.0)])
+            else:
+                lines.append([(f"{temp:.0f}°", color, 1.0)])
+        return lines
 
     def _render_icon_pixmap(self, lines):
         """Render label lines to an SNI IconPixmap (w, h, big-endian ARGB32).
 
-        The canvas is square and the font is auto-sized to fill it, so the tray
-        host (which fits icons into a square slot) never shrinks the text: one
-        value uses a big single line, "CPU + GPU" stacks two lines. Reliable
-        everywhere, unlike the XAyatanaLabel extension which KDE ignores.
-        Returns None when there is nothing to show.
+        Each line is a list of (text, rgb, scale) segments. The canvas is square
+        and the base font is auto-sized to fill it, so the tray host (which fits
+        icons into a square slot) never shrinks the text: one value is a big
+        single line, "CPU + GPU" stacks two prefixed lines. Reliable everywhere,
+        unlike the XAyatanaLabel extension which KDE ignores. Returns None when
+        there is nothing to show.
         """
         if not lines:
             return None
@@ -233,28 +254,42 @@ class Tray:
         cr = cairo.Context(surf)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
 
-        # Pick the largest font that fits both the per-line height budget and the
-        # widest line's width within the square.
-        line_budget = (S - 2 * pad) / n
-        font_size = line_budget * (0.98 if n == 1 else 1.06)
-        cr.set_font_size(font_size)
-        max_w = max(cr.text_extents(t).width for t, _ in lines) or 1
-        if max_w > avail_w:
-            font_size *= avail_w / max_w
-            cr.set_font_size(font_size)
+        def line_width(line, base):
+            w = 0.0
+            for j, (text, _c, scale) in enumerate(line):
+                if j > 0:
+                    w += base * self.SEG_GAP
+                cr.set_font_size(base * scale)
+                w += cr.text_extents(text).x_advance
+            return w
 
+        # Largest base font that fits both the per-line height budget and the
+        # widest line within the square.
         line_h = (S - 2 * pad) / n
-        for i, (text, color) in enumerate(lines):
-            ext = cr.text_extents(text)
-            x = (S - ext.width) / 2 - ext.x_bearing
+        base = line_h * (0.98 if n == 1 else 1.02)
+        max_w = max(line_width(line, base) for line in lines) or 1
+        if max_w > avail_w:
+            base *= avail_w / max_w
+
+        for i, line in enumerate(lines):
+            total = line_width(line, base)
+            x = (S - total) / 2
             band_top = pad + i * line_h
-            y = band_top + (line_h - ext.height) / 2 - ext.y_bearing
-            cr.set_source_rgba(0, 0, 0, 0.55)
-            cr.move_to(x + 1, y + 1)
-            cr.show_text(text)
-            cr.set_source_rgba(*color, 1.0)
-            cr.move_to(x, y)
-            cr.show_text(text)
+            cr.set_font_size(base)
+            fe = cr.font_extents()           # (ascent, descent, height, ...)
+            baseline = band_top + (line_h - (fe[0] + fe[1])) / 2 + fe[0]
+            for j, (text, color, scale) in enumerate(line):
+                if j > 0:
+                    x += base * self.SEG_GAP
+                cr.set_font_size(base * scale)
+                adv = cr.text_extents(text).x_advance
+                cr.set_source_rgba(0, 0, 0, 0.55)
+                cr.move_to(x + 1, baseline + 1)
+                cr.show_text(text)
+                cr.set_source_rgba(*color, 1.0)
+                cr.move_to(x, baseline)
+                cr.show_text(text)
+                x += adv
         surf.flush()
 
         data = surf.get_data()
