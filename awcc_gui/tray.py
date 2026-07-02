@@ -194,57 +194,76 @@ class Tray:
             return ""
         return settings.format_label(st.get("cpu_temp"), st.get("gpu_temp"))
 
-    def _temp_color(self):
-        st = self.window.state or {}
-        temps = [t for t in (st.get("cpu_temp"), st.get("gpu_temp")) if t is not None]
-        hot = max(temps) if temps else 0
-        if hot < 65:
+    @staticmethod
+    def _color_for(temp):
+        if temp is None:
+            return (0.80, 0.80, 0.85)
+        if temp < 65:
             return (0.55, 0.90, 0.55)   # green
-        if hot < 85:
+        if temp < 85:
             return (0.98, 0.80, 0.35)   # amber
         return (0.96, 0.45, 0.45)       # red
 
-    def _render_icon_pixmap(self, text):
-        """Render `text` to an SNI IconPixmap (w, h, big-endian ARGB32 bytes).
+    def _label_lines(self):
+        """Lines to draw on the icon: list of (text, rgb). 1 line, or 2 stacked."""
+        st = self.window.state or {}
+        settings = getattr(self.window, "settings", None)
+        if settings is None:
+            return []
+        entries = settings.label_entries(st.get("cpu_temp"), st.get("gpu_temp"))
+        return [(text, self._color_for(temp)) for text, temp in entries]
 
-        This is the reliable way to show live temperatures in the tray: unlike
-        the XAyatanaLabel extension (which some hosts, notably KDE, ignore), an
-        IconPixmap is always rendered. Returns None for empty text.
+    def _render_icon_pixmap(self, lines):
+        """Render label lines to an SNI IconPixmap (w, h, big-endian ARGB32).
+
+        The canvas is square and the font is auto-sized to fill it, so the tray
+        host (which fits icons into a square slot) never shrinks the text: one
+        value uses a big single line, "CPU + GPU" stacks two lines. Reliable
+        everywhere, unlike the XAyatanaLabel extension which KDE ignores.
+        Returns None when there is nothing to show.
         """
-        if not text:
+        if not lines:
             return None
-        H = 44
-        font_size = 30
-        measure = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 8, 8))
-        measure.select_font_face("Sans", cairo.FONT_SLANT_NORMAL,
-                                 cairo.FONT_WEIGHT_BOLD)
-        measure.set_font_size(font_size)
-        ext = measure.text_extents(text)
-        W = max(H, int(ext.width + 12))
+        S = 48                      # square canvas (host scales to panel height)
+        pad = 3
+        avail_w = S - 2 * pad
+        n = len(lines)
 
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, S, S)
         cr = cairo.Context(surf)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+
+        # Pick the largest font that fits both the per-line height budget and the
+        # widest line's width within the square.
+        line_budget = (S - 2 * pad) / n
+        font_size = line_budget * (0.98 if n == 1 else 1.06)
         cr.set_font_size(font_size)
-        ext = cr.text_extents(text)
-        x = (W - ext.width) / 2 - ext.x_bearing
-        y = (H - ext.height) / 2 - ext.y_bearing
-        # Shadow for legibility on light or dark panels, then the coloured text.
-        cr.set_source_rgba(0, 0, 0, 0.55)
-        cr.move_to(x + 1.2, y + 1.2)
-        cr.show_text(text)
-        cr.set_source_rgba(*self._temp_color(), 1.0)
-        cr.move_to(x, y)
-        cr.show_text(text)
+        max_w = max(cr.text_extents(t).width for t, _ in lines) or 1
+        if max_w > avail_w:
+            font_size *= avail_w / max_w
+            cr.set_font_size(font_size)
+
+        line_h = (S - 2 * pad) / n
+        for i, (text, color) in enumerate(lines):
+            ext = cr.text_extents(text)
+            x = (S - ext.width) / 2 - ext.x_bearing
+            band_top = pad + i * line_h
+            y = band_top + (line_h - ext.height) / 2 - ext.y_bearing
+            cr.set_source_rgba(0, 0, 0, 0.55)
+            cr.move_to(x + 1, y + 1)
+            cr.show_text(text)
+            cr.set_source_rgba(*color, 1.0)
+            cr.move_to(x, y)
+            cr.show_text(text)
         surf.flush()
 
         data = surf.get_data()
         stride = surf.get_stride()
-        out = bytearray(W * H * 4)
+        out = bytearray(S * S * 4)
         o = 0
-        for row in range(H):
+        for row in range(S):
             base = row * stride
-            for cx in range(W):
+            for cx in range(S):
                 i = base + cx * 4
                 # Cairo (little-endian ARGB32) is B,G,R,A -> SNI wants A,R,G,B.
                 out[o] = data[i + 3]
@@ -252,7 +271,7 @@ class Tray:
                 out[o + 2] = data[i + 1]
                 out[o + 3] = data[i]
                 o += 4
-        return (W, H, bytes(out))
+        return (S, S, bytes(out))
 
     def update(self):
         """Called when new daemon state arrives (or a label pref change);
@@ -309,7 +328,7 @@ class Tray:
             # rendered IconPixmap; otherwise use the themed fan logo.
             return GLib.Variant("s", "" if self._label_text() else ICON_NAME)
         if name == "IconPixmap":
-            pm = self._render_icon_pixmap(self._label_text())
+            pm = self._render_icon_pixmap(self._label_lines())
             return GLib.Variant("a(iiay)", [pm] if pm else [])
         if name in ("IconThemePath", "OverlayIconName", "AttentionIconName"):
             return GLib.Variant("s", "")

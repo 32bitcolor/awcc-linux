@@ -75,6 +75,7 @@ class Settings:
             self.save()
 
     def format_label(self, cpu, gpu) -> str:
+        """Single-line text for the tooltip / XAyatanaLabel."""
         pref = self.tray_label
         if pref == LABEL_OFF:
             return ""
@@ -86,6 +87,22 @@ class Settings:
         c = f"{cpu:.0f}" if cpu is not None else "–"
         g = f"{gpu:.0f}" if gpu is not None else "–"
         return f"{c}/{g}°"
+
+    def label_entries(self, cpu, gpu):
+        """Lines for the tray icon pixmap: list of (text, temp).
+
+        `both` yields two stacked lines (CPU then GPU) so the icon can stay
+        square and readable rather than a wide, shrunk single line.
+        """
+        pref = self.tray_label
+        out = []
+        if pref == LABEL_OFF:
+            return out
+        if pref in (LABEL_CPU, LABEL_BOTH) and cpu is not None:
+            out.append((f"{cpu:.0f}°", cpu))
+        if pref in (LABEL_GPU, LABEL_BOTH) and gpu is not None:
+            out.append((f"{gpu:.0f}°", gpu))
+        return out
 
     # -- autostart ---------------------------------------------------------
 
