@@ -19,6 +19,7 @@ from awcc_gui import __version__  # noqa: E402
 from awcc_gui.backend import Backend  # noqa: E402
 from awcc_gui.curve_editor import FanCurveEditor  # noqa: E402
 from awcc_gui.graph import HistoryGraph  # noqa: E402
+from awcc_gui.tray import Tray  # noqa: E402
 
 APP_ID = "io.github.awcclinux.Awcc"
 
@@ -88,6 +89,7 @@ class MainWindow(Adw.ApplicationWindow):
         from gi.repository import Gio
         model = Gio.Menu()
         model.append("About AWCC-Linux", "app.about")
+        model.append("Quit", "app.quit")
         menu.set_menu_model(model)
         menu_btn.set_popover(menu)
         header.pack_end(menu_btn)
@@ -115,8 +117,16 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.set_content(toolbar)
 
+        self._last_prof = None
+        self._last_mode = None
+        self._quitting = False
+
         self.backend = Backend(self._on_state, self._on_status)
         self.backend.start()
+
+        # System-tray icon (StatusNotifierItem). Lets the app keep running in
+        # the tray after the window is closed.
+        self.tray = Tray(self)
         self.connect("close-request", self._on_close)
 
     # -- dashboard page ----------------------------------------------------
@@ -294,6 +304,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._sync_fans(state)
         self._sync_sensors(state)
         self._sync_curves(state)
+        self._sync_tray(state)
         return False
 
     def _sync_profiles(self, state):
@@ -398,7 +409,35 @@ class MainWindow(Adw.ApplicationWindow):
         self._editors["cpu"].set_current_temp(state.get("cpu_temp"))
         self._editors["gpu"].set_current_temp(state.get("gpu_temp"))
 
+    def _sync_tray(self, state):
+        self.tray.update()
+        prof = state.get("profile")
+        mode = (state.get("config") or {}).get("mode")
+        if prof != self._last_prof or mode != self._last_mode:
+            self._last_prof, self._last_mode = prof, mode
+            self.tray.notify_layout_changed()
+
+    # -- tray-driven actions ----------------------------------------------
+
+    def show_from_tray(self):
+        self.set_visible(True)
+        self.present()
+        return False
+
+    def quit_app(self):
+        self._quitting = True
+        self.tray.shutdown()
+        self.backend.stop()
+        app = self.get_application()
+        if app:
+            app.quit()
+        return False
+
     def _on_close(self, *_a):
+        # Minimize to the tray instead of quitting, when a tray host is present.
+        if not self._quitting and getattr(self, "tray", None) and self.tray.available:
+            self.set_visible(False)
+            return True  # stop the default destroy
         self.backend.stop()
         return False
 
@@ -415,7 +454,11 @@ class AwccApp(Adw.Application):
             about = Gio.SimpleAction.new("about", None)
             about.connect("activate", self._on_about)
             self.add_action(about)
-        self._win.present()
+            quit_act = Gio.SimpleAction.new("quit", None)
+            quit_act.connect("activate", lambda *a: self._win.quit_app())
+            self.add_action(quit_act)
+        # Relaunching (e.g. clicking the desktop icon) restores from the tray.
+        self._win.show_from_tray()
 
     def _on_about(self, *_a):
         dlg = Adw.AboutWindow(

@@ -23,6 +23,10 @@ fan boost, and fully custom **fan curves** — driven by the mainline
   fan groups, evaluated continuously by the daemon. This is the AWCC headline
   feature that Linux otherwise lacks.
 - **Manual fan boost** — pin the CPU/GPU fans to a fixed boost level.
+- **System tray** — closing the window minimizes to the system tray
+  (StatusNotifierItem, native on KDE Plasma). The tray shows live CPU/GPU temps
+  on hover and offers quick thermal-profile and fan-mode switching plus Quit;
+  left-click restores the window.
 - **Terminal client** — `awcc-cli` for scripting and headless use.
 - **Safe by design** — fan control uses the driver's *additive* `fanN_boost`
   mechanism. Boost only ever *adds* cooling on top of the embedded controller's
